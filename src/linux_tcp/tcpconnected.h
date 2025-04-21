@@ -20,6 +20,7 @@
 #include "tcpinbuffer.h"
 #include "tcpextstate.h"
 #include "poll.h"
+#include <mutex>
 
 /**
  *  Set up namespace
@@ -37,6 +38,12 @@ private:
      *  @var TcpOutBuffer
      */
     TcpOutBuffer _out;
+
+    /**
+     *  The outgoing buffer access guard
+     *  @var std::mutex
+     */
+    mutable std::mutex _out_guard;
     
     /**
      *  An incoming buffer
@@ -101,6 +108,8 @@ public:
         _out(std::move(buffer)),
         _in(4096)
     {
+        const std::lock_guard<std::mutex> lock(_out_guard);
+
         // if there is already an output buffer, we have to send out that first
         if (_out) _out.sendto(_socket);
         
@@ -117,7 +126,11 @@ public:
      *  Number of bytes in the outgoing buffer
      *  @return std::size_t
      */
-    virtual std::size_t queued() const override { return _out.size(); }
+    virtual std::size_t queued() const override
+    {
+        const std::lock_guard<std::mutex> lock(_out_guard);
+        return _out.size();
+    }
 
     /**
      *  Process the filedescriptor in the object
@@ -134,6 +147,8 @@ public:
         // can we write more data to the socket?
         if (flags & writable)
         {
+            const std::lock_guard<std::mutex> lock(_out_guard);
+
             // send out the buffered data
             auto result = _out.sendto(_socket);
             
@@ -195,24 +210,33 @@ public:
     {
         // we stop sending when connection is closed
         if (_closed) return;
+
+        const std::lock_guard<std::mutex> lock(_out_guard);
         
         // is there already a buffer of data that can not be sent?
         if (_out) return _out.add(buffer, size);
 
-        // there is no buffer, send the data right away
-        auto result = ::send(_socket, buffer, size, AMQP_CPP_MSG_NOSIGNAL);
+        size_t remaining = size;
+        size_t bytes = 0;
+        while (remaining > 0)
+        {
+            // there is no buffer, send the data right away
+            auto result = ::send(_socket, buffer+bytes, remaining, AMQP_CPP_MSG_NOSIGNAL);
+            if (result < 0)
+            {
+                if (errno == EAGAIN) continue;
 
-        // number of bytes sent
-        size_t bytes = result < 0 ? 0 : result;
+                // add the data to the buffer
+                _out.add(buffer + bytes, remaining);
+                break;
+            }
 
-        // ok if all data was sent
-        if (bytes >= size) return;
-    
-        // add the data to the buffer
-        _out.add(buffer + bytes, size - bytes);
-        
-        // start monitoring the socket to find out when it is writable
-        _parent->onIdle(this, _socket, readable | writable);
+            bytes += result;
+            remaining -= result;
+        }
+
+        // tell the handler to monitor the socket, if there is still an out
+        if(_out) _parent->onIdle(this, _socket, readable | writable);
     }
     
     /**
@@ -227,7 +251,7 @@ public:
         _closed = true;
         
         // wait until the outgoing buffer is all gone
-        if (_out) return;
+        if (queued() > 0) return;
         
         // we will shutdown the socket in a very elegant way, we notify the peer 
         // that we will not be sending out more write operations

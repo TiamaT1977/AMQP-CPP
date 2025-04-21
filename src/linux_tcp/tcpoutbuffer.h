@@ -264,7 +264,14 @@ public:
             if (header.msg_iovlen == 0) break;
 
             // send the data
-            auto result = sendmsg(socket, &header, AMQP_CPP_MSG_NOSIGNAL);
+            int result = 0;
+            while(true)
+            {
+                result = sendmsg(socket, &header, AMQP_CPP_MSG_NOSIGNAL);
+                if (result < 0 && errno == EAGAIN) continue;
+
+                break;
+            }
 
             // skip on error, or when nothing was written
             if (result <= 0) return total > 0 ? total : result;
