@@ -328,7 +328,10 @@ void ConnectionImpl::setReady()
         const auto &buffer = _queue.front();
         
         // send it
-        _handler->onData(_parent, buffer.data(), buffer.size());
+        {
+            const std::lock_guard<std::mutex> lock(_send_guard);
+        	_handler->onData(_parent, buffer.data(), buffer.size());
+        }
         
         // stop if monitor is gone
         if (!monitor.valid()) return;
@@ -395,6 +398,8 @@ bool ConnectionImpl::send(const Frame &frame)
     if ((_state == state_connected && _queue.empty()) || frame.partOfHandshake())
     {
         // we need an output buffer (this will immediately send the data)
+        // hold the guard for the whole frame, not per onData() chunk
+        const std::lock_guard<std::mutex> lock(_send_guard);
         PassthroughBuffer buffer(_parent, _handler, frame);
     }
     else
@@ -420,7 +425,8 @@ bool ConnectionImpl::send(CopiedBuffer &&buffer)
     // are we waiting for other frames to be sent before us?
     if (_queue.empty())
     {
-        // send it directly
+        // send it directly, under the same frame-level guard
+        const std::lock_guard<std::mutex> lock(_send_guard);
         _handler->onData(_parent, buffer.data(), buffer.size());
     }
     else

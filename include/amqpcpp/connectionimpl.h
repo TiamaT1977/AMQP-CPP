@@ -25,6 +25,7 @@
 #include <unordered_map>
 #include <memory>
 #include <queue>
+#include <mutex>
 
 /**
  *  Set up namespace
@@ -124,7 +125,16 @@ protected:
      *  @var    queue
      */
     std::queue<CopiedBuffer> _queue;
-    
+
+    /**
+     *  Serialises frame emission: one AMQP frame must reach the handler as one
+     *  uninterrupted sequence of onData() calls. PassthroughBuffer splits frames
+     *  bigger than 4096 bytes into up to three calls, and other threads
+     *  (heartbeat timer, io thread's Close-Ok) send frames concurrently.
+     *  @var std::mutex
+     */
+    std::mutex _send_guard;
+
     /**
      *  Helper method to send the close frame
      *  Return value tells if the connection is still valid
